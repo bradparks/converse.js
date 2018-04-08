@@ -127,7 +127,7 @@
                 // Mock 'getRoomFeatures', otherwise the room won't be
                 // displayed as it waits first for the features to be returned
                 // (when it's a new room being created).
-                spyOn(_converse.ChatRoomView.prototype, 'getRoomFeatures').and.callFake(function () {
+                spyOn(_converse.ChatRoom.prototype, 'getRoomFeatures').and.callFake(function () {
                     var deferred = new $.Deferred();
                     deferred.resolve();
                     return deferred.promise();
@@ -3091,7 +3091,7 @@
                 test_utils.waitUntil(function () {
                     return u.isVisible(modal.el);
                 }, 1000).then(function () {
-                    spyOn(_converse.ChatRoomView.prototype, 'getRoomFeatures').and.callFake(function () {
+                    spyOn(_converse.ChatRoom.prototype, 'getRoomFeatures').and.callFake(function () {
                         var deferred = new $.Deferred();
                         deferred.resolve();
                         return deferred.promise();
@@ -3126,7 +3126,7 @@
                 test_utils.waitUntil(function () {
                     return u.isVisible(modal.el);
                 }, 1000).then(function () {
-                    spyOn(_converse.ChatRoomView.prototype, 'getRoomFeatures').and.callFake(function () {
+                    spyOn(_converse.ChatRoom.prototype, 'getRoomFeatures').and.callFake(function () {
                         var deferred = new $.Deferred();
                         deferred.resolve();
                         return deferred.promise();

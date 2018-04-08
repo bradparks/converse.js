@@ -275,6 +275,151 @@
                     );
                 },
 
+                initialize() {
+                    this.constructor.__super__.initialize.apply(this, arguments);
+                    this.occupants = new _converse.ChatRoomOccupants();
+                    this.registerHandlers();
+                },
+
+                registerHandlers () {
+                    /* Register presence and message handlers for this chat
+                     * room
+                     */
+                    const room_jid = this.get('jid');
+                    this.removeHandlers();
+                    this.presence_handler = _converse.connection.addHandler(
+                        this.onPresence.bind(this),
+                        Strophe.NS.MUC, 'presence', null, null, room_jid,
+                        {'ignoreNamespaceFragment': true, 'matchBareFromJid': true}
+                    );
+                    this.message_handler = _converse.connection.addHandler(
+                        this.onMessage.bind(this),
+                        null, 'message', 'groupchat', null, room_jid,
+                        {'matchBareFromJid': true}
+                    );
+                },
+
+                removeHandlers () {
+                    /* Remove the presence and message handlers that were
+                     * registered for this chat room.
+                     */
+                    if (this.message_handler) {
+                        _converse.connection.deleteHandler(this.message_handler);
+                        delete this.message_handler;
+                    }
+                    if (this.presence_handler) {
+                        _converse.connection.deleteHandler(this.presence_handler);
+                        delete this.presence_handler;
+                    }
+                    return this;
+                },
+
+                addHandler (type, name, callback) {
+                    /* Allows 'presence' and 'message' handlers to be
+                     * registered. These will be executed once presence or
+                     * message stanzas are received, and *before* this model's
+                     * own handlers are executed.
+                     */
+                    if (_.isNil(this.handlers)) {
+                        this.handlers = {};
+                    }
+                    if (_.isNil(this.handlers.type)) {
+                        this.handlers.type = {};
+                    }
+                    this.handlers.type[name] = callback;
+                },
+
+                join (nick, password) {
+                    /* Join the chat room.
+                     *
+                     * Parameters:
+                     *  (String) nick: The user's nickname
+                     *  (String) password: Optional password, if required by
+                     *      the room.
+                     */
+                    nick = nick ? nick : this.get('nick');
+                    if (!nick) {
+                        throw new TypeError('join: You need to provide a valid nickname');
+                    }
+                    if (this.get('connection_status') === converse.ROOMSTATUS.ENTERED) {
+                        // We have restored a chat room from session storage,
+                        // so we don't send out a presence stanza again.
+                        return this;
+                    }
+                    const stanza = $pres({
+                        'from': _converse.connection.jid,
+                        'to': this.getRoomJIDAndNick(nick)
+                    }).c("x", {'xmlns': Strophe.NS.MUC})
+                      .c("history", {'maxstanzas': _converse.muc_history_max_stanzas}).up();
+                    if (password) {
+                        stanza.cnode(Strophe.xmlElement("password", [], password));
+                    }
+                    this.save('connection_status', converse.ROOMSTATUS.CONNECTING);
+                    _converse.connection.send(stanza);
+                    return this;
+                },
+
+                leave (exit_msg) {
+                    /* Leave the chat room.
+                     *
+                     * Parameters:
+                     *  (String) exit_msg: Optional message to indicate your
+                     *      reason for leaving.
+                     */
+                    this.occupants.reset();
+                    this.occupants.browserStorage._clear();
+                    if (_converse.connection.connected) {
+                        this.sendUnavailablePresence(exit_msg);
+                    }
+                    u.safeSave(this, {'connection_status': converse.ROOMSTATUS.DISCONNECTED});
+                    this.removeHandlers();
+                },
+
+                sendUnavailablePresence (exit_msg) {
+                    const presence = $pres({
+                        type: "unavailable",
+                        from: _converse.connection.jid,
+                        to: this.getRoomJIDAndNick()
+                    });
+                    if (exit_msg !== null) {
+                        presence.c("status", exit_msg);
+                    }
+                    _converse.connection.sendPresence(presence);
+                },
+
+                getRoomFeatures () {
+                    /* Fetch the room disco info, parse it and then save it.
+                     */
+                    return new Promise((resolve, reject) => {
+                        _converse.connection.disco.info(
+                            this.get('jid'),
+                            null,
+                            _.flow(this.parseRoomFeatures.bind(this), resolve),
+                            () => { reject(new Error("Could not parse the room features")) },
+                            5000
+                        );
+                    });
+                },
+
+                getRoomJIDAndNick (nick) {
+                    /* Utility method to construct the JID for the current user
+                     * as occupant of the room.
+                     *
+                     * This is the room JID, with the user's nick added at the
+                     * end.
+                     *
+                     * For example: room@conference.example.org/nickname
+                     */
+                    if (nick) {
+                        this.save({'nick': nick});
+                    } else {
+                        nick = this.get('nick');
+                    }
+                    const room = this.get('jid');
+                    const jid = Strophe.getBareJidFromJid(room);
+                    return jid + (nick !== null ? `/${nick}` : "");
+                },
+
                 directInvite (recipient, reason) {
                     /* Send a direct invitation as per XEP-0249
                      *
@@ -312,30 +457,6 @@
                         'recipient': recipient,
                         'reason': reason
                     });
-                },
-
-
-                sendConfiguration (config, callback, errback) {
-                    /* Send an IQ stanza with the room configuration.
-                     *
-                     * Parameters:
-                     *  (Array) config: The room configuration
-                     *  (Function) callback: Callback upon succesful IQ response
-                     *      The first parameter passed in is IQ containing the
-                     *      room configuration.
-                     *      The second is the response IQ from the server.
-                     *  (Function) errback: Callback upon error IQ response
-                     *      The first parameter passed in is IQ containing the
-                     *      room configuration.
-                     *      The second is the response IQ from the server.
-                     */
-                    const iq = $iq({to: this.get('jid'), type: "set"})
-                        .c("query", {xmlns: Strophe.NS.MUC_OWNER})
-                        .c("x", {xmlns: Strophe.NS.XFORM, type: "submit"});
-                    _.each(config || [], function (node) { iq.cnode(node).up(); });
-                    callback = _.isUndefined(callback) ? _.noop : _.partial(callback, iq.nodeTree);
-                    errback = _.isUndefined(errback) ? _.noop : _.partial(errback, iq.nodeTree);
-                    return _converse.connection.sendIQ(iq, callback, errback);
                 },
 
                 parseRoomFeatures (iq) {
@@ -430,6 +551,109 @@
                     );
                     const promises = _.map(members, _.bind(this.sendAffiliationIQ, this, affiliation));
                     return Promise.all(promises);
+                },
+
+                saveConfiguration (form) {
+                    /* Submit the room configuration form by sending an IQ
+                     * stanza to the server.
+                     *
+                     * Returns a promise which resolves once the XMPP server
+                     * has return a response IQ.
+                     *
+                     * Parameters:
+                     *  (HTMLElement) form: The configuration form DOM element.
+                     *      If no form is provided, the default configuration
+                     *      values will be used.
+                     */
+                    return new Promise((resolve, reject) => {
+                        const inputs = form ? sizzle(':input:not([type=button]):not([type=submit])', form) : [],
+                              configArray = _.map(inputs, u.webForm2xForm);
+                        this.sendConfiguration(configArray, resolve, reject);
+                        if (_.isNil(form)) {
+                            this.trigger('auto-configured');
+                        }
+                    });
+                },
+
+                autoConfigureChatRoom () {
+                    /* Automatically configure room based on this model's
+                     * 'roomconfig' data.
+                     *
+                     * Returns a promise which resolves once a response IQ has
+                     * been received.
+                     */
+                    return new Promise((resolve, reject) => {
+                        this.fetchRoomConfiguration().then((stanza) => {
+                            const configArray = [],
+                                fields = stanza.querySelectorAll('field'),
+                                config = this.get('roomconfig');
+                            let count = fields.length;
+
+                            _.each(fields, (field) => {
+                                const fieldname = field.getAttribute('var').replace('muc#roomconfig_', ''),
+                                    type = field.getAttribute('type');
+                                let value;
+                                if (fieldname in config) {
+                                    switch (type) {
+                                        case 'boolean':
+                                            value = config[fieldname] ? 1 : 0;
+                                            break;
+                                        case 'list-multi':
+                                            // TODO: we don't yet handle "list-multi" types
+                                            value = field.innerHTML;
+                                            break;
+                                        default:
+                                            value = config[fieldname];
+                                    }
+                                    field.innerHTML = $build('value').t(value);
+                                }
+                                configArray.push(field);
+                                if (!--count) {
+                                    this.sendConfiguration(configArray, resolve, reject);
+                                }
+                            });
+                        });
+                    });
+                },
+
+                fetchRoomConfiguration () {
+                    /* Send an IQ stanza to fetch the room configuration data.
+                     * Returns a promise which resolves once the response IQ
+                     * has been received.
+                     */
+                    return new Promise((resolve, reject) => {
+                        _converse.connection.sendIQ(
+                            $iq({
+                                'to': this.get('jid'),
+                                'type': "get"
+                            }).c("query", {xmlns: Strophe.NS.MUC_OWNER}),
+                            resolve,
+                            reject
+                        );
+                    });
+                },
+
+                sendConfiguration (config, callback, errback) {
+                    /* Send an IQ stanza with the room configuration.
+                     *
+                     * Parameters:
+                     *  (Array) config: The room configuration
+                     *  (Function) callback: Callback upon succesful IQ response
+                     *      The first parameter passed in is IQ containing the
+                     *      room configuration.
+                     *      The second is the response IQ from the server.
+                     *  (Function) errback: Callback upon error IQ response
+                     *      The first parameter passed in is IQ containing the
+                     *      room configuration.
+                     *      The second is the response IQ from the server.
+                     */
+                    const iq = $iq({to: this.get('jid'), type: "set"})
+                        .c("query", {xmlns: Strophe.NS.MUC_OWNER})
+                        .c("x", {xmlns: Strophe.NS.XFORM, type: "submit"});
+                    _.each(config || [], function (node) { iq.cnode(node).up(); });
+                    callback = _.isUndefined(callback) ? _.noop : _.partial(callback, iq.nodeTree);
+                    errback = _.isUndefined(errback) ? _.noop : _.partial(errback, iq.nodeTree);
+                    return _converse.connection.sendIQ(iq, callback, errback);
                 },
 
                 saveAffiliationAndRole (pres) {
@@ -553,6 +777,247 @@
                         }),
                         callback, errback);
                     return this;
+                },
+
+                findOccupant (data) {
+                    /* Try to find an existing occupant based on the passed in
+                     * data object.
+                     *
+                     * If we have a JID, we use that as lookup variable,
+                     * otherwise we use the nick. We don't always have both,
+                     * but should have at least one or the other.
+                     */
+                    const jid = Strophe.getBareJidFromJid(data.jid);
+                    if (jid !== null) {
+                        return this.occupants.where({'jid': jid}).pop();
+                    } else {
+                        return this.occupants.where({'nick': data.nick}).pop();
+                    }
+                },
+
+                updateOccupantsOnPresence (pres) {
+                    /* Given a presence stanza, update the occupant models
+                     * based on its contents.
+                     *
+                     * Parameters:
+                     *  (XMLElement) pres: The presence stanza
+                     */
+                    const data = this.parsePresence(pres);
+                    if (data.type === 'error') {
+                        return true;
+                    }
+                    const occupant = this.findOccupant(data);
+                    if (data.type === 'unavailable') {
+                        if (occupant) { occupant.destroy(); }
+                    } else {
+                        const jid = Strophe.getBareJidFromJid(data.jid);
+                        const attributes = _.extend(data, {
+                            'jid': jid ? jid : undefined,
+                            'resource': data.jid ? Strophe.getResourceFromJid(data.jid) : undefined
+                        });
+                        if (occupant) {
+                            occupant.save(attributes);
+                        } else {
+                            this.occupants.create(attributes);
+                        }
+                    }
+                },
+
+                parsePresence (pres) {
+                    const id = Strophe.getResourceFromJid(pres.getAttribute("from"));
+                    const data = {
+                        nick: id,
+                        type: pres.getAttribute("type"),
+                        states: []
+                    };
+                    _.each(pres.childNodes, function (child) {
+                        switch (child.nodeName) {
+                            case "status":
+                                data.status = child.textContent || null;
+                                break;
+                            case "show":
+                                data.show = child.textContent || 'online';
+                                break;
+                            case "x":
+                                if (child.getAttribute("xmlns") === Strophe.NS.MUC_USER) {
+                                    _.each(child.childNodes, function (item) {
+                                        switch (item.nodeName) {
+                                            case "item":
+                                                data.affiliation = item.getAttribute("affiliation");
+                                                data.role = item.getAttribute("role");
+                                                data.jid = item.getAttribute("jid");
+                                                data.nick = item.getAttribute("nick") || data.nick;
+                                                break;
+                                            case "status":
+                                                if (item.getAttribute("code")) {
+                                                    data.states.push(item.getAttribute("code"));
+                                                }
+                                        }
+                                    });
+                                }
+                        }
+                    });
+                    return data;
+                },
+
+                isDuplicateBasedOnTime (message) {
+                    /* Checks whether a received messages is actually a
+                     * duplicate based on whether it has a "ts" attribute
+                     * with a unix timestamp.
+                     *
+                     * This is used for better integration with Slack's XMPP
+                     * gateway, which doesn't use message IDs but instead the
+                     * aforementioned "ts" attributes.
+                     */
+                    const entity = _converse.disco_entities.get(_converse.domain);
+                    if (entity.identities.where({'name': "Slack-XMPP"})) {
+                        const ts = message.getAttribute('ts');
+                        if (_.isNull(ts)) {
+                            return false;
+                        } else {
+                            return this.messages.where({
+                                'sender': 'me',
+                                'message': this.getMessageBody(message)
+                            }).filter(
+                                (msg) => Math.abs(moment(msg.get('time')).diff(moment.unix(ts))) < 5000
+                            ).length > 0;
+                        }
+                    }
+                    return false;
+                },
+
+                isDuplicate (message, original_stanza) {
+                    const msgid = message.getAttribute('id'),
+                          jid = message.getAttribute('from'),
+                          resource = Strophe.getResourceFromJid(jid),
+                          sender = resource && Strophe.unescapeNode(resource) || '';
+                    if (msgid) {
+                        return this.messages.filter(
+                            // Some bots (like HAL in the prosody chatroom)
+                            // respond to commands with the same ID as the
+                            // original message. So we also check the sender.
+                            (msg) => msg.get('msgid') === msgid && msg.get('fullname') === sender
+                        ).length > 0;
+                    }
+                    return this.isDuplicateBasedOnTime(message);
+                },
+
+                fetchFeaturesIfConfigurationChanged (stanza) {
+                    const configuration_changed = stanza.querySelector("status[code='104']"),
+                          logging_enabled = stanza.querySelector("status[code='170']"),
+                          logging_disabled = stanza.querySelector("status[code='171']"),
+                          room_no_longer_anon = stanza.querySelector("status[code='172']"),
+                          room_now_semi_anon = stanza.querySelector("status[code='173']"),
+                          room_now_fully_anon = stanza.querySelector("status[code='173']");
+
+                    if (configuration_changed || logging_enabled || logging_disabled ||
+                            room_no_longer_anon || room_now_semi_anon || room_now_fully_anon) {
+                        this.getRoomFeatures();
+                    }
+                },
+
+                onMessage (stanza) {
+                    /* Handler for all MUC messages sent to this chat room.
+                     *
+                     * Parameters:
+                     *  (XMLElement) stanza: The message stanza.
+                     */
+                    _.each(_.values(this.handlers.message), (callback) => callback());
+                    this.fetchFeaturesIfConfigurationChanged(stanza);
+
+                    const original_stanza = stanza,
+                          forwarded = stanza.querySelector('forwarded');
+                    let delay;
+                    if (!_.isNull(forwarded)) {
+                        stanza = forwarded.querySelector('message');
+                        delay = forwarded.querySelector('delay');
+                    }
+                    const jid = stanza.getAttribute('from'),
+                        resource = Strophe.getResourceFromJid(jid),
+                        sender = resource && Strophe.unescapeNode(resource) || '',
+                        subject = _.propertyOf(stanza.querySelector('subject'))('textContent');
+
+                    if (this.isDuplicate(stanza, original_stanza)) {
+                        return true;
+                    }
+                    if (subject) {
+                        u.safeSave(this, {'subject': {'author': sender, 'text': subject}});
+                    }
+                    if (sender === '') {
+                        return true;
+                    }
+                    this.incrementUnreadMsgCounter(original_stanza);
+                    this.createMessage(stanza, delay, original_stanza);
+                    if (sender !== this.get('nick')) {
+                        // We only emit an event if it's not our own message
+                        _converse.emit('message', {'stanza': original_stanza, 'chatbox': this});
+                    }
+                },
+
+                onPresence (pres) {
+                    /* Handles all MUC presence stanzas.
+                     *
+                     * Parameters:
+                     *  (XMLElement) pres: The stanza
+                     */
+                    debugger;
+                    _.each(_.values(this.handlers.presence), (callback) => callback());
+                    if (pres.getAttribute('type') === 'error') {
+                        this.save('connection_status', converse.ROOMSTATUS.DISCONNECTED);
+                        return;
+                    }
+                    const is_self = pres.querySelector("status[code='110']");
+                    if (is_self && pres.getAttribute('type') !== 'unavailable') {
+                        this.onOwnChatRoomPresence(pres);
+                    }
+                    this.updateOccupantsOnPresence(pres);
+                    if (this.get('role') !== 'none' && this.get('connection_status') === converse.ROOMSTATUS.CONNECTING) {
+                        this.save('connection_status', converse.ROOMSTATUS.CONNECTED);
+                    }
+                },
+ 
+                onOwnChatRoomPresence (pres) {
+                    /* Handles a received presence relating to the current
+                     * user.
+                     *
+                     * For locked rooms (which are by definition "new"), the
+                     * room will either be auto-configured or created instantly
+                     * (with default config) or a configuration room will be
+                     * rendered.
+                     *
+                     * If the room is not locked, then the room will be
+                     * auto-configured only if applicable and if the current
+                     * user is the room's owner.
+                     *
+                     * Parameters:
+                     *  (XMLElement) pres: The stanza
+                     */
+                    this.saveAffiliationAndRole(pres);
+
+                    const locked_room = pres.querySelector("status[code='201']");
+                    if (locked_room) {
+                        if (this.get('auto_configure')) {
+                            this.autoConfigureChatRoom().then(this.getRoomFeatures.bind(this));
+                        } else if (_converse.muc_instant_rooms) {
+                            // Accept default configuration
+                            this.saveConfiguration().then(this.getRoomFeatures.bind(this));
+                        } else {
+                            this.trigger('configuration-needed');
+                            return; // We haven't yet entered the room, so bail here.
+                        }
+                    } else if (!this.get('features_fetched')) {
+                        // The features for this room weren't fetched.
+                        // That must mean it's a new room without locking
+                        // (in which case Prosody doesn't send a 201 status),
+                        // otherwise the features would have been fetched in
+                        // the "initialize" method already.
+                        if (this.get('affiliation') === 'owner' && this.get('auto_configure')) {
+                            this.autoConfigureChatRoom().then(this.getRoomFeatures.bind(this));
+                        } else {
+                            this.getRoomFeatures();
+                        }
+                    }
+                    this.save('connection_status', converse.ROOMSTATUS.ENTERED);
                 },
 
                 isUserMentioned (message) {
@@ -725,7 +1190,7 @@
                 _converse.chatboxviews.each(function (view) {
                     if (view.model.get('type') === converse.CHATROOMS_TYPE) {
                         view.model.save('connection_status', converse.ROOMSTATUS.DISCONNECTED);
-                        view.registerHandlers();
+                        view.model.registerHandlers();
                         view.join();
                         view.fetchMessages();
                     }
